@@ -1,0 +1,302 @@
+---
+title:  'Prediction Assignment'
+subtitle: 'Practical Machine Learning Coursera Data Science Specialization Course'
+output: html_document
+---
+
+## Summary
+
+Machine learning algorithms were used to predict the classification as to the
+manner in which individuals performed a prescribed exercise.  After data
+cleaning, Random Forests showed the highest estimated out-of-sample accuracy
+and was used to predict the classe variable for all 20 testing data set
+observations.
+
+## Details
+
+#### Initialize R Session
+
+Load required libraries, set options, and set.seed for random number
+generation used in several machine learning algorithms.
+
+```{r init}
+# load required packages
+library(knitr)
+library(data.table)
+library(plyr)
+library(dplyr)
+library(caret)
+
+# setup knitr
+opts_chunk$set(warning=F, message=F, fig.width=10)
+# set seed for repeatable results
+set.seed(123456789)
+```
+
+#### Get data (if needed)
+
+Data downloaded directly from the URLs presented as part of the project.  Data
+is only download if it is not already within the environment.
+
+```{r get_data}
+# data URLs
+training.url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+testing.url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+# get data if needed
+if (!exists('training.raw')) {
+  training.raw <- fread(training.url, sep=',', header=TRUE, stringsAsFactors=TRUE)
+  testing.raw <- fread(testing.url, sep=',', header=TRUE, stringsAsFactors=TRUE)
+}
+```
+
+#### Look at data summaries
+
+After downloading the data, look at summary information about the data to see
+if there is any obvious data cleaning that must be done and/or if any
+structure in the data can be readily seen.  Look at anything related to the
+training data set but DO NOT look directly at the test data set.
+
+```{r data_summaries}
+dim(training.raw)
+summary(training.raw)
+dim(testing.raw)
+```
+
+Note that the summary of the training.raw data presented above contains
+username (likely not useful if attempting to detect general features of the
+dataset, many "#DIV/0!" and "" (empty string) elements.  Also, note the
+testing data set only contains 20 rows.  Thus, the use of any time information
+seems not be useful as there are not enough samples in the testing data set.
+
+#### Clean up data into a tidy data set
+
+Now that there is an idea of what needs to be done to clean up the data sets,
+do it:
+
+1. Remove seemingly meaningless variable
+  + username
+  + timestamps
+2. Fix numeric cols -  "" and "#DIV/0!" in what appears to be numeric variable
+  + replace with NA
+  + transform variable to numeric
+  + will leave most if not all variables as numeric
+3. Remove columns with most if not all missing (NA) (really, any column with an NA in it)
+4. Fix mistakes in variable names
+5. Drop any other variables that do not seem important
+
+The summary of the clean and tidy training data set is also presented.
+
+NOTE: All cleaning steps HAVE to be performed on both the training and the
+testing data sets.
+
+```{r cleanup_data}
+# 1. Remove seemingly meaningless variable
+rm.cols <- function(DT) {
+  # if needed
+  # remove V1 col (1st unnamed col which is just a row number) 
+  if ('V1' %in% colnames(DT))
+    DT[,V1:=NULL]
+  # remove uername, timestamps
+  if ('user_name' %in% colnames(DT))
+    DT[,user_name:=NULL]
+  timestamp.cols <- grep('timestamp', colnames(DT), value=TRUE)
+  if (any(grepl('timestamp', colnames(DT))))
+    DT[,(timestamp.cols) := NULL]
+}
+# 2. Fix numeric cols -  "" and "#DIV/0!" in what appears to be numeric variable
+fix.numeric.cols <- function(DT, values=c('', '#DIV/0!')) {
+  # function to revalue factor field containing '' and '#DIV/0!' factor levels
+  reval.and.as.numeric.col <- function(column) {
+    if (any(values %in% levels(column)))
+      as.numeric(mapvalues(column, from=values, to=rep(NA, length.out=length(values))))
+    else
+      column  
+  }
+  # get cols to check then do it
+  factor.vars <- which(sapply(DT, is.factor))
+  if (length(factor.vars) > 0)
+    DT[,(factor.vars):=lapply(.SD, reval.and.as.numeric.col), .SDcols=factor.vars]
+}
+# 3. Remove columns with most if not all missing (NA) (really, any column with an NA in it)
+rm.cols.of.NAs <- function(DT) {
+  col.has.na <- function(x) {
+    any(is.na(x))
+  }
+  # get cols to drop, then drop them
+  cols.drop <- which(sapply(DT, col.has.na))
+  DT[,(cols.drop):=NULL] 
+}
+# 4. Fix mistakes in variable names
+fix.mispell.colnames <- function(DT) {
+  # picth -> pitch via gsub
+  colnames(DT) <- gsub('picth', 'pitch', colnames(DT))
+}
+# 5. Drop any other variables that do not seem important
+drop.cols <- function(DT, cols) {
+  DT[,(cols):=NULL]
+}
+# function to apply all to both sets
+clean.data <- function() {
+  rm.cols(training); rm.cols(testing)
+  values <- c('', '#DIV/0!')
+  fix.numeric.cols(training, values); fix.numeric.cols(testing, values)
+  rm.cols.of.NAs(training); rm.cols.of.NAs(testing)
+  fix.mispell.colnames(training); fix.mispell.colnames(testing)
+  cols.to.drop <- grep('window', colnames(training), value=TRUE)
+  drop.cols(training, cols.to.drop); drop.cols(testing, cols.to.drop)
+}
+# do it now
+clean.data()
+# show summary as well
+summary(training)
+```
+
+#### Explore data
+
+Now that there is a clean data set to explore and start building a prediction
+model with, take a look at a few potential features.
+
+```{r explore}
+featurePlot(x=training[,1:30, with=F],
+  y=training$classe,
+  plot = "box",
+  ## Pass in options to bwplot() 
+  scales = list(y = list(relation="free"),
+              x = list(rot = 90)),
+  layout = c(6,5),
+  do.out=FALSE,
+  auto.key = list(columns = 5)
+)
+featurePlot(x=training[,31:52, with=F],
+  y=training$classe,
+  plot = "box",
+  ## Pass in options to bwplot() 
+  scales = list(y = list(relation="free"),
+              x = list(rot = 90)),
+  layout = c(6,4),
+  do.out=FALSE,
+  auto.key = list(columns = 5)
+)
+```
+
+#### Setup Cross Validation
+
+In order to allow for a reasonable estimate of the out-of-sample error rate,
+use 3-fold cross validation within the train function in generating the model.
+Reported accuracy will then be a reasonable estimate of the out-of-sample
+error rate.
+
+```{r setup_cv}
+# setup cross validation
+# try 3-fold cross validation
+train.control <- trainControl(method='cv', number=3, allowParallel = TRUE)
+```
+
+#### Generate and evaluate classification models with all variables
+
+Since classe is a factor variable with 5 levels (A, B, C, D, E) classification
+based machine learning algorithms must be employed.  The algorithms employed
+in this project include random forests (rf), naive Bayes (nb), stochastic
+gradient boosting (gbm), CART (rpart) and k-nearest neighbors (knn).  All
+variables left after data cleaning are used as features without additional
+processing in each model.  All classification models are generated below and
+evaluated in the next section.  To reduce computational time, the models are
+evaluated only if they do not currently exist.
+
+1. Random Forest (rf)
+```{r rf_model}
+if (!exists('rf.model')) {
+  rf.model <- train(classe ~ ., data=training, trControl=train.control, 
+    method='rf', prox=TRUE, importance = TRUE)
+  rf.predictions <- predict(rf.model, newdata=training)
+  rf.confusMat <- confusionMatrix(rf.predictions, training$classe)
+}
+```
+
+2. Naive Bayes (nb)
+```{r nb_model}
+if (!exists('nb.model')) {
+  nb.model <- train(classe ~ ., data=training, trControl=train.control, 
+    method='nb', importance = TRUE)
+  nb.predictions <- predict(nb.model, newdata=training)
+  nb.confusMat <- confusionMatrix(nb.predictions, training$classe)
+}
+```
+
+3. Stochastic Gradient Boosting (gbm)
+```{r gbm_model}
+if (!exists('gbm.model')) {
+  gbm.model <- train(classe ~ ., data=training, trControl=train.control, 
+    method='gbm', verbose=FALSE)
+  gbm.predictions <- predict(gbm.model, newdata=training)
+  gbm.confusMat <- confusionMatrix(gbm.predictions, training$classe)
+}
+```
+
+4. CART (rpart)
+```{r rpart_model}
+if (!exists('rpart.model')) {
+  rpart.model <- train(classe ~ ., data=training, trControl=train.control, 
+    method='rpart')
+  rpart.predictions <- predict(rpart.model, newdata=training)
+  rpart.confusMat <- confusionMatrix(rpart.predictions, training$classe)
+}
+```
+5. k-Nearest Neighbors (knn)
+```{r knn_model}
+if (!exists('knn.model')) {
+  knn.model <- train(classe ~ ., data=training, trControl=train.control, 
+    method='knn')
+  knn.predictions <- predict(knn.model, newdata=training)
+  knn.confusMat <- confusionMatrix(knn.predictions, training$classe)
+}
+```
+
+#### Classification model performance
+
+The performance (as estimated out-of-sample accuracy since 3-fold cross
+validation was used) of each model on the training data set is presented
+below:
+
+```{r performance}
+# put models in a list to use *ply functions to get results out
+models <- list(rf=rf.model, nb=nb.model, gbm=gbm.model, rpart=rpart.model, knn=knn.model)
+# get max accuracy (will also be used as finalModel in any predict function)
+max.accuracy <- sapply(models, function(x) {max(x$results$Accuracy)})
+# show results
+max.accuracy
+```
+
+Random forests demonstrated the best performance with an estimated
+out-of-sample accuracy of `r max(max.accuracy)*100`% with stochastic gradient
+boosting (gbm) a close second.  The best and final model generated by Random
+Forests was used to predict the classe of each observation in the testing data
+set.
+
+#### Variables of importance
+
+Random forests can also be used to identify which variables are important to
+classifying each observation of the training data set as part of its
+algorithm.  The top 20 variables for each classe are shown below.
+
+```{r var_importance}
+varImp(rf.model)
+```
+
+This list of variable importance could be used to limit the variables used in
+future analysis.  However, this type of model refinement was viewed to be
+outside the scope of this project.
+
+#### Predictions on the testing data set
+
+The Random Forests model generated above was used to predict the classe
+classification for all observations in the testing data set (which was also
+cleaned in exactly the same manner as the training data set).
+
+```{r predict_testing}
+# predict using the Random Forests model
+predictions <- predict(rf.model, newdata=testing)
+# shown them along with case number (to facilitate the quiz)
+data.frame(N=1:length(predictions), predicted.classe=predictions)
+```
